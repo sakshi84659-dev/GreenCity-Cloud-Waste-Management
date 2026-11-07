@@ -116,7 +116,5 @@ The application opens on `http://localhost:5000`.
 - **Roll Number:** 10895
 - **Department:** Computer Engineering
 - **College:** Fr. Conceicao Rodrigues College of Engineering, Bandra (West), Mumbai – 400 050
-- **University:** University of Mumbai
-- **Project Guide:** Prof. Sangeeta Parshionikar
 - **Academic Year:** 2026–2027
 - **Project Type:** Individual Mini Project
