@@ -1,0 +1,640 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  GreenCity - Cloud-Based Smart Waste Management and Complaint Tracking System
+  Production Cloud Architecture including Custom VPC, Multi-AZ Subnets, EC2 Backend,
+  RDS MySQL, S3 Bucket, SSM Parameter Store, and CloudWatch Monitoring.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: greencity
+    Description: Environment prefix for resource naming
+
+  VpcCIDR:
+    Type: String
+    Default: 10.0.0.0/16
+    Description: IP range for the custom GreenCity VPC
+
+  PublicSubnet1CIDR:
+    Type: String
+    Default: 10.0.1.0/24
+    Description: IP range for Public Subnet 1 (AZ A)
+
+  PublicSubnet2CIDR:
+    Type: String
+    Default: 10.0.2.0/24
+    Description: IP range for Public Subnet 2 (AZ B)
+
+  PrivateSubnet1CIDR:
+    Type: String
+    Default: 10.0.10.0/24
+    Description: IP range for Private Subnet 1 (AZ A)
+
+  PrivateSubnet2CIDR:
+    Type: String
+    Default: 10.0.11.0/24
+    Description: IP range for Private Subnet 2 (AZ B)
+
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues: [t2.micro, t3.micro, t3.small]
+    Description: EC2 Instance Type for application server
+
+  DBInstanceClass:
+    Type: String
+    Default: db.t3.micro
+    AllowedValues: [db.t2.micro, db.t3.micro, db.t4g.micro]
+    Description: Database instance class for RDS MySQL
+
+  DBName:
+    Type: String
+    Default: greencity
+    Description: MySQL Database name
+
+  DBUser:
+    Type: String
+    Default: greencity_admin
+    Description: Master username for RDS MySQL
+
+  DBPassword:
+    Type: String
+    Default: GreenCityRDS@2026
+    NoEcho: true
+    Description: Master password for RDS MySQL
+
+  JWTSecret:
+    Type: String
+    Default: 90dd7571019e9bb28e479f2c025c94d52ed2c3e44da99b921e849ef2552b22eb2f27c6395d1f01854a2afa2ff20f0bea
+    NoEcho: true
+    Description: 256-bit secret for signing JSON Web Tokens
+
+  UseLabRole:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: Set to true if deploying in AWS Academy / Vocareum Learner Lab
+
+  LatestAmiId:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64'
+    Description: Latest Amazon Linux 2023 AMI
+
+Conditions:
+  IsInLab: !Equals [!Ref UseLabRole, 'true']
+  NotLab: !Equals [!Ref UseLabRole, 'false']
+
+Resources:
+  # ============================================================================
+  # 1. NETWORKING: CUSTOM VPC, SUBNETS, IGW & ROUTE TABLES
+  # ============================================================================
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCIDR
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-vpc'
+        - Key: Project
+          Value: GreenCity
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-igw'
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PublicSubnet1CIDR
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-public-subnet-1'
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PublicSubnet2CIDR
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-public-subnet-2'
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PrivateSubnet1CIDR
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-private-subnet-1'
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PrivateSubnet2CIDR
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-private-subnet-2'
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-public-rt'
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  Subnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  Subnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-private-rt'
+
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable
+
+  # ============================================================================
+  # 2. SECURITY GROUPS (LEAST PRIVILEGE)
+  # ============================================================================
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for GreenCity Full-Stack EC2 Instance
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: Inbound HTTP Frontend
+        - IpProtocol: tcp
+          FromPort: 5000
+          ToPort: 5000
+          CidrIp: 0.0.0.0/0
+          Description: Inbound Backend REST API
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+          Description: SSH Administration
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: Outbound access for package installation and AWS APIs
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-app-sg'
+
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for GreenCity RDS MySQL (Restricted to App SG)
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref AppSecurityGroup
+          Description: Allow MySQL access only from EC2 application server
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-rds-sg'
+
+  # ============================================================================
+  # 3. STORAGE: S3 BUCKET FOR COMPLAINT IMAGES
+  # ============================================================================
+  ComplaintImagesBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${EnvironmentName}-complaints-${AWS::AccountId}-${AWS::Region}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders: ['*']
+            AllowedMethods: [GET, PUT, POST, HEAD]
+            AllowedOrigins: ['*']
+            MaxAge: 3600
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-complaints-bucket'
+
+  # ============================================================================
+  # 4. DATABASE: AMAZON RDS MYSQL (MULTI-AZ SUBNET GROUP)
+  # ============================================================================
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnets for GreenCity RDS MySQL Database
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-db-subnet-group'
+
+  RDSInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBName: !Ref DBName
+      AllocatedStorage: '20'
+      DBInstanceClass: !Ref DBInstanceClass
+      Engine: mysql
+      EngineVersion: '8.0'
+      MasterUsername: !Ref DBUser
+      MasterUserPassword: !Ref DBPassword
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups:
+        - !Ref RDSSecurityGroup
+      PubliclyAccessible: false
+      MultiAZ: false
+      StorageType: gp2
+      BackupRetentionPeriod: 1
+      DeleteAutomatedBackups: true
+      SkipFinalSnapshot: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-rds-mysql'
+
+  # ============================================================================
+  # 5. SECRETS MANAGEMENT: AWS SSM PARAMETER STORE
+  # ============================================================================
+  SSMParamDBHost:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /greencity/prod/db_host
+      Type: String
+      Value: !GetAtt RDSInstance.Endpoint.Address
+      Description: RDS MySQL Endpoint
+
+  SSMParamDBUser:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /greencity/prod/db_user
+      Type: String
+      Value: !Ref DBUser
+      Description: Master Database Username
+
+  SSMParamDBPassword:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /greencity/prod/db_password
+      Type: String
+      Value: !Ref DBPassword
+      Description: Database Password
+
+  SSMParamDBName:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /greencity/prod/db_name
+      Type: String
+      Value: !Ref DBName
+      Description: Database Name
+
+  SSMParamDBPort:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /greencity/prod/db_port
+      Type: String
+      Value: '3306'
+      Description: Database Port
+
+  SSMParamJWTSecret:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /greencity/prod/jwt_secret
+      Type: String
+      Value: !Ref JWTSecret
+      Description: Application JWT Secret
+
+  SSMParamS3Bucket:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /greencity/prod/s3_bucket
+      Type: String
+      Value: !Ref ComplaintImagesBucket
+      Description: S3 Bucket Name for complaint photos
+
+  # ============================================================================
+  # 6. OBSERVABILITY: CLOUDWATCH LOGS & ALARMS
+  # ============================================================================
+  CloudWatchLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /greencity/backend
+      RetentionInDays: 7
+
+  CloudWatch5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: GreenCityHigh5xxErrors
+      AlarmDescription: Alarm when GreenCity backend generates 3 or more 5xx errors in 5 minutes
+      Namespace: GreenCity/Application
+      MetricName: 5xxErrors
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 3
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  CloudWatchLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: GreenCityHighAPILatency
+      AlarmDescription: Alarm when API response latency exceeds 1500ms on average
+      Namespace: GreenCity/Application
+      MetricName: APILatency
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1500
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  # ============================================================================
+  # 7. COMPUTE: APPLICATION SERVER (EC2 WITH AUTOMATIC BOOTSTRAP)
+  # ============================================================================
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - RDSInstance
+      - SSMParamDBHost
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref LatestAmiId
+      SubnetId: !Ref PublicSubnet1
+      SecurityGroupIds:
+        - !Ref AppSecurityGroup
+      IamInstanceProfile: !If [IsInLab, 'LabInstanceProfile', !Ref 'AWS::NoValue']
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -e
+          exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
+
+          echo "=========================================================="
+          echo " Starting GreenCity EC2 Cloud Deployment"
+          echo "=========================================================="
+
+          # 1. Update OS packages and install Node.js 20, Git, Nginx, MariaDB client
+          dnf update -y
+          dnf install -y git nginx mariadb105
+          dnf module enable -y nodejs:20
+          dnf install -y nodejs
+
+          node -v
+          npm -v
+
+          # 2. Setup application directory
+          mkdir -p /opt/greencity
+          cd /opt/greencity
+
+          # Export Environment Variables
+          export DB_HOST="${RDSInstance.Endpoint.Address}"
+          export DB_USER="${DBUser}"
+          export DB_PASSWORD="${DBPassword}"
+          export DB_NAME="${DBName}"
+          export DB_PORT="3306"
+          export PORT="5000"
+          export JWT_SECRET="${JWTSecret}"
+          export AWS_REGION="${AWS::Region}"
+          export S3_BUCKET="${ComplaintImagesBucket}"
+          export USE_SSM="true"
+          export SSM_PREFIX="/greencity/prod"
+          export ENABLE_CLOUDWATCH="true"
+          export CLOUDWATCH_LOG_GROUP="/greencity/backend"
+
+          echo "Waiting for RDS MySQL endpoint ($DB_HOST:3306) to become ready..."
+          while ! nc -z -w 3 $DB_HOST 3306 2>/dev/null && ! mysqladmin ping -h "$DB_HOST" -u "$DB_USER" -p"$DB_PASSWORD" --silent 2>/dev/null; do
+            echo "Waiting for database connection..."
+            sleep 5
+          done
+          echo "Database is ready!"
+
+          # 3. Initialize Database Schema
+          mysql -h "$DB_HOST" -u "$DB_USER" -p"$DB_PASSWORD" "$DB_NAME" << 'EOSQL'
+          CREATE TABLE IF NOT EXISTS users (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            name VARCHAR(100) NOT NULL,
+            email VARCHAR(150) NOT NULL UNIQUE,
+            password VARCHAR(255) NOT NULL,
+            role ENUM('Admin', 'Staff') DEFAULT 'Staff',
+            status ENUM('Active', 'Inactive') DEFAULT 'Active',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          );
+
+          CREATE TABLE IF NOT EXISTS complaints (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            name VARCHAR(100) NOT NULL,
+            location VARCHAR(255) NOT NULL,
+            category VARCHAR(100) NOT NULL,
+            description TEXT NOT NULL,
+            image_key VARCHAR(255) NULL,
+            status ENUM('Pending', 'In Progress', 'Resolved') DEFAULT 'Pending',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            INDEX idx_complaints_status (status),
+            INDEX idx_complaints_category (category),
+            INDEX idx_complaints_created_at (created_at)
+          );
+
+          CREATE TABLE IF NOT EXISTS vehicles (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            vehicle_number VARCHAR(50) NOT NULL UNIQUE,
+            vehicle_type VARCHAR(100) NOT NULL,
+            driver_name VARCHAR(100) NOT NULL,
+            driver_phone VARCHAR(20) NULL,
+            capacity DECIMAL(10,2) NOT NULL,
+            status ENUM('Active', 'Inactive', 'Maintenance') DEFAULT 'Active',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          );
+
+          CREATE TABLE IF NOT EXISTS waste_collections (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            location VARCHAR(255) NOT NULL,
+            waste_type VARCHAR(100) NOT NULL,
+            quantity DECIMAL(10,2) NOT NULL,
+            collection_date DATE NOT NULL,
+            vehicle_number VARCHAR(50) NULL,
+            status ENUM('Scheduled', 'Collected', 'Pending') DEFAULT 'Scheduled',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          );
+
+          CREATE TABLE IF NOT EXISTS collection_locations (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            location_name VARCHAR(150) NOT NULL,
+            address VARCHAR(255) NOT NULL,
+            area VARCHAR(100) NOT NULL,
+            latitude DECIMAL(10,7) NULL,
+            longitude DECIMAL(10,7) NULL,
+            bin_capacity DECIMAL(10,2) NULL,
+            waste_type VARCHAR(100) NULL,
+            status ENUM('Active', 'Inactive', 'Full') DEFAULT 'Active',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          );
+
+          -- Seed primary administrator account: sakshikhajuria12@gmail.com
+          INSERT INTO users (name, email, password, role, status) VALUES (
+            'sakshi',
+            'sakshikhajuria12@gmail.com',
+            '$2b$12$Y1pYqj116Yq7iT6Z8Xn2e.6kXq2cR4n9M0i3O8s0K1jje4X9B04i6',
+            'Admin',
+            'Active'
+          ) ON DUPLICATE KEY UPDATE role='Admin', status='Active';
+          EOSQL
+
+          echo "Database schema initialized successfully."
+
+          # 4. Clone or extract GreenCity Backend
+          # Creates systemd service for GreenCity backend
+          cat << 'EOF' > /etc/systemd/system/greencity-backend.service
+          [Unit]
+          Description=GreenCity Cloud Waste Management Backend
+          After=network.target
+
+          [Service]
+          Type=simple
+          User=ec2-user
+          WorkingDirectory=/opt/greencity/backend
+          ExecStart=/usr/bin/node server.js
+          Restart=always
+          RestartSec=5
+          Environment=PORT=5000
+          Environment=NODE_ENV=production
+          Environment=USE_SSM=true
+          Environment=SSM_PREFIX=/greencity/prod
+          Environment=AWS_REGION=${AWS::Region}
+          Environment=ENABLE_CLOUDWATCH=true
+          Environment=CLOUDWATCH_LOG_GROUP=/greencity/backend
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          systemctl daemon-reload
+
+          # 5. Configure Nginx Reverse Proxy (Port 80 -> Port 5000)
+          cat << 'EOFNGINX' > /etc/nginx/conf.d/greencity.conf
+          server {
+              listen 80;
+              server_name _;
+
+              location / {
+                  proxy_pass http://127.0.0.1:5000;
+                  proxy_http_version 1.1;
+                  proxy_set_header Upgrade $http_upgrade;
+                  proxy_set_header Connection 'upgrade';
+                  proxy_set_header Host $host;
+                  proxy_cache_bypass $http_upgrade;
+                  client_max_body_size 10M;
+              }
+          }
+          EOFNGINX
+          systemctl enable nginx
+          systemctl restart nginx
+
+          # 6. Fetch application bundle from S3 if present
+          mkdir -p /opt/greencity
+          aws s3 cp "s3://${ComplaintImagesBucket}/deploy/greencity-app.zip" /tmp/greencity-app.zip --region "${AWS::Region}" || true
+          if [ -f /tmp/greencity-app.zip ]; then
+            unzip -o /tmp/greencity-app.zip -d /opt/greencity
+            cd /opt/greencity/backend
+            npm install --omit=dev
+            systemctl enable greencity-backend
+            systemctl restart greencity-backend
+          fi
+
+          echo "GreenCity initialization script completed."
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-app-server'
+        - Key: Project
+          Value: GreenCity
+
+Outputs:
+  VPCId:
+    Description: GreenCity VPC ID
+    Value: !Ref VPC
+
+  EC2PublicIP:
+    Description: Application Server Public IPv4 Address
+    Value: !GetAtt EC2Instance.PublicIp
+
+  BackendURL:
+    Description: GreenCity Backend API Base URL
+    Value: !Sub 'http://${EC2Instance.PublicIp}:5000/api'
+
+  FrontendURL:
+    Description: GreenCity Web Application URL
+    Value: !Sub 'http://${EC2Instance.PublicIp}'
+
+  RDSEndpoint:
+    Description: RDS MySQL Database Endpoint
+    Value: !GetAtt RDSInstance.Endpoint.Address
+
+  S3BucketName:
+    Description: Amazon S3 Bucket for complaint photographs
+    Value: !Ref ComplaintImagesBucket
+
+  CloudWatchLogGroup:
+    Description: CloudWatch Log Group for application diagnostics
+    Value: !Ref CloudWatchLogGroup
